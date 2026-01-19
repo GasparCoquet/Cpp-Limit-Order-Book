@@ -2,18 +2,20 @@
 
 #include "Order.h"
 #include <map>
-#include <list>
+#include <deque>
 #include <unordered_map>
 #include <vector>
 #include <memory>
 #include <optional>
+#include <cstdint>
 
 namespace LOB {
 
 // A price level contains a FIFO queue of orders
+// Using deque for better cache locality than list
 struct PriceLevel {
     Price price;
-    std::list<Order> orders;
+    std::deque<Order> orders;  // Better cache locality than std::list
     Quantity totalQuantity;
 
     PriceLevel(Price p) : price(p), totalQuantity(0) {}
@@ -48,9 +50,10 @@ private:
     // Asks: Lower price has priority (ascending order)
     std::map<Price, PriceLevel, std::less<Price>> asks_;
     
-    // O(1) order lookup: maps OrderId -> (iterator to order in list, price level)
+    // O(1) order lookup: maps OrderId -> (index in deque, price level, side)
+    // Using indices instead of iterators to avoid invalidation issues
     struct OrderLocation {
-        std::list<Order>::iterator orderIter;
+        size_t orderIndex;  // Index in the deque at this price level
         Price priceLevel;
         Side side;
     };
