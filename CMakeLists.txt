@@ -31,6 +31,10 @@ target_link_libraries(orderbook orderbook_lib)
 
 # Optional: Enable testing
 enable_testing()
+# Verification tests
+add_executable(verify tests/verification_tests.cpp)
+target_link_libraries(verify orderbook_lib)
+add_test(NAME verification COMMAND verify)
 
 # Print configuration
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
