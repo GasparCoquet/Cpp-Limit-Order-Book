@@ -13,8 +13,7 @@ This project focuses on microstructure mechanics, efficient memory management, a
 * **Price-Time Priority:** Standard matching algorithm ensuring fair execution based on price competitiveness and arrival time.
 * **Low Latency Architecture:**
     * Uses `std::map` (Red-Black Tree) for ordered price levels to maintain a sorted book.
-    * Optimized using `std::list` (or `std::deque`) for O(1) insertions/deletions at price levels.
-    * Designed with cache locality in mind to minimize page faults during high-throughput replay.
+    * Optimized using `std::list` (doubly linked list) for O(1) insertions/deletions at price levels; O(1) erase via list iterators for cancel/modify.
 * **Robust Simulation:** Supports standard order types (Limit, Market, Cancel, Modify).
 
 ## 🛠️ Technical Architecture
@@ -41,4 +40,5 @@ The engine uses a dual-structure approach to balance **Ordering** (needed for ma
 ```bash
 mkdir build && cd build
 cmake ..
-make
+cmake --build .
+```

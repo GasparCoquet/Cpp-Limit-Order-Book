@@ -1,8 +1,8 @@
 #pragma once
 
 #include "Order.h"
+#include <list>
 #include <map>
-#include <deque>
 #include <unordered_map>
 #include <vector>
 #include <memory>
@@ -11,11 +11,10 @@
 
 namespace LOB {
 
-// A price level contains a FIFO queue of orders
-// Using deque for better cache locality than list
+// A price level contains a FIFO queue of orders (doubly linked list for O(1) erase)
 struct PriceLevel {
     Price price;
-    std::deque<Order> orders;  // Better cache locality than std::list
+    std::list<Order> orders;
     Quantity totalQuantity;
 
     PriceLevel(Price p) : price(p), totalQuantity(0) {}
@@ -50,10 +49,9 @@ private:
     // Asks: Lower price has priority (ascending order)
     std::map<Price, PriceLevel, std::less<Price>> asks_;
     
-    // O(1) order lookup: maps OrderId -> (index in deque, price level, side)
-    // Using indices instead of iterators to avoid invalidation issues
+    // O(1) order lookup: maps OrderId -> (list iterator, price level, side)
     struct OrderLocation {
-        size_t orderIndex;  // Index in the deque at this price level
+        std::list<Order>::iterator orderIt;
         Price priceLevel;
         Side side;
     };

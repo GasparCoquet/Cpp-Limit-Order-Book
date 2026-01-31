@@ -43,34 +43,12 @@ bool OrderBook::modifyOrder(OrderId orderId, Price newPrice, Quantity newQuantit
         return false;  // Order not found
     }
     
-    // Get order location info
     const OrderLocation& loc = it->second;
+    Order oldOrder = *loc.orderIt;
     
-    // Retrieve the order from the appropriate book
-    std::optional<Order> oldOrder;
-    if (loc.side == Side::BUY) {
-        auto priceIt = bids_.find(loc.priceLevel);
-        if (priceIt == bids_.end() || loc.orderIndex >= priceIt->second.orders.size()) {
-            return false;  // Order not found (shouldn't happen)
-        }
-        oldOrder = priceIt->second.orders[loc.orderIndex];
-    } else {
-        auto priceIt = asks_.find(loc.priceLevel);
-        if (priceIt == asks_.end() || loc.orderIndex >= priceIt->second.orders.size()) {
-            return false;  // Order not found (shouldn't happen)
-        }
-        oldOrder = priceIt->second.orders[loc.orderIndex];
-    }
-    
-    if (!oldOrder.has_value()) {
-        return false;
-    }
-    
-    // Remove old order
     removeFromBook(orderId);
-    
-    // Add new order with updated price/quantity
-    Order newOrder = oldOrder.value();
+
+    Order newOrder = oldOrder;
     newOrder.price = newPrice;
     newOrder.quantity = newQuantity;
     newOrder.timestamp = timestamp_++;  // New timestamp (loses priority)
@@ -173,24 +151,16 @@ void OrderBook::addToBook(Order order) {
         auto [levelIt, inserted] = bids_.try_emplace(order.price, order.price);
         PriceLevel& level = levelIt->second;
         
-        // Add order to FIFO queue
         level.orders.push_back(order);
         level.totalQuantity += order.quantity;
-        
-        // Index the order for O(1) lookup - store index instead of iterator
-        size_t index = level.orders.size() - 1;
-        orderIndex_[order.id] = {index, order.price, order.side};
+        orderIndex_[order.id] = {std::prev(level.orders.end()), order.price, order.side};
     } else {
         auto [levelIt, inserted] = asks_.try_emplace(order.price, order.price);
         PriceLevel& level = levelIt->second;
-        
-        // Add order to FIFO queue
+
         level.orders.push_back(order);
         level.totalQuantity += order.quantity;
-        
-        // Index the order for O(1) lookup - store index instead of iterator
-        size_t index = level.orders.size() - 1;
-        orderIndex_[order.id] = {index, order.price, order.side};
+        orderIndex_[order.id] = {std::prev(level.orders.end()), order.price, order.side};
     }
 }
 
@@ -199,74 +169,33 @@ void OrderBook::removeFromBook(OrderId orderId) {
     if (indexIt == orderIndex_.end()) {
         return;
     }
-    
-    const OrderLocation& location = indexIt->second;
-    
-    if (location.side == Side::BUY) {
-        auto& book = bids_;
-        auto levelIt = book.find(location.priceLevel);
-        if (levelIt != book.end()) {
+
+    const OrderLocation& loc = indexIt->second;
+    std::map<Price, PriceLevel, std::greater<Price>>* bidBook = &bids_;
+    std::map<Price, PriceLevel, std::less<Price>>* askBook = &asks_;
+
+    if (loc.side == Side::BUY) {
+        auto levelIt = bidBook->find(loc.priceLevel);
+        if (levelIt != bidBook->end()) {
             PriceLevel& level = levelIt->second;
-            
-            // Get order at this index
-            if (location.orderIndex < level.orders.size()) {
-                Order& order = level.orders[location.orderIndex];
-                
-                // Update total quantity
-                level.totalQuantity -= order.quantity;
-                
-                // Remove order from deque
-                level.orders.erase(level.orders.begin() + location.orderIndex);
-                
-                // Update indices for remaining orders after this position
-                // This is O(k) where k = orders after this position
-                // But necessary for correctness when using index-based storage
-                for (auto& [id, loc] : orderIndex_) {
-                    if (loc.side == Side::BUY && loc.priceLevel == location.priceLevel && 
-                        loc.orderIndex > location.orderIndex) {
-                        loc.orderIndex--;
-                    }
-                }
-                
-                // Remove empty price level
-                if (level.orders.empty()) {
-                    book.erase(levelIt);
-                }
+            level.totalQuantity -= loc.orderIt->quantity;
+            level.orders.erase(loc.orderIt);
+            if (level.orders.empty()) {
+                bidBook->erase(levelIt);
             }
         }
     } else {
-        auto& book = asks_;
-        auto levelIt = book.find(location.priceLevel);
-        if (levelIt != book.end()) {
+        auto levelIt = askBook->find(loc.priceLevel);
+        if (levelIt != askBook->end()) {
             PriceLevel& level = levelIt->second;
-            
-            // Get order at this index
-            if (location.orderIndex < level.orders.size()) {
-                Order& order = level.orders[location.orderIndex];
-                
-                // Update total quantity
-                level.totalQuantity -= order.quantity;
-                
-                // Remove order from deque
-                level.orders.erase(level.orders.begin() + location.orderIndex);
-                
-                // Update indices for remaining orders after this position
-                for (auto& [id, loc] : orderIndex_) {
-                    if (loc.side == Side::SELL && loc.priceLevel == location.priceLevel && 
-                        loc.orderIndex > location.orderIndex) {
-                        loc.orderIndex--;
-                    }
-                }
-                
-                // Remove empty price level
-                if (level.orders.empty()) {
-                    book.erase(levelIt);
-                }
+            level.totalQuantity -= loc.orderIt->quantity;
+            level.orders.erase(loc.orderIt);
+            if (level.orders.empty()) {
+                askBook->erase(levelIt);
             }
         }
     }
-    
-    // Remove from index
+
     orderIndex_.erase(indexIt);
 }
 
