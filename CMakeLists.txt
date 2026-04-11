@@ -36,6 +36,10 @@ add_executable(verify tests/verification_tests.cpp)
 target_link_libraries(verify orderbook_lib)
 add_test(NAME verification COMMAND verify)
 
+# Latency benchmarks
+add_executable(latency_bench benchmarks/latency_benchmarks.cpp)
+target_link_libraries(latency_bench orderbook_lib)
+
 # Print configuration
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
