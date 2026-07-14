@@ -39,7 +39,7 @@ cmake --build . --target latency_bench
 ./latency_bench
 ```
 
-No benchmark figures are published here. The previous numbers were not reproducible on the hardware available to the author, so they have been removed rather than left standing. A measured, reproducible benchmark — with the machine and methodology stated — is being reworked and will be published only once it can be regenerated from this repository.
+No benchmark figures are published here. The previous numbers were not reproducible on the hardware available to the author, so they have been removed rather than left standing. A measured, reproducible benchmark - with the machine and methodology stated - is being reworked and will be published only once it can be regenerated from this repository.
 
 ## 📦 Build & Run
 
