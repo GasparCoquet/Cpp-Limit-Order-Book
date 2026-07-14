@@ -7,53 +7,85 @@ namespace LOB {
 
 OrderBook::OrderBook() : timestamp_(0) {}
 
-void OrderBook::addOrder(const Order& order) {
-    Order newOrder = order;
-    newOrder.timestamp = timestamp_++;
-    
+bool OrderBook::addOrder(const Order& order) {
     switch (order.type) {
-        case OrderType::LIMIT:
-            matchLimitOrder(newOrder);
-            break;
-        case OrderType::MARKET:
-            matchMarketOrder(newOrder);
-            break;
         case OrderType::CANCEL:
-            cancelOrder(order.id);
-            break;
+            return cancelOrder(order.id);
         case OrderType::MODIFY:
-            modifyOrder(order.id, order.price, order.quantity);
+            return modifyOrder(order.id, order.price, order.quantity);
+        case OrderType::LIMIT:
+        case OrderType::MARKET:
             break;
     }
+
+    // Reject duplicate live OrderIds.
+    //
+    // addToBook wrote the index with `orderIndex_[id] = ...`, which silently
+    // OVERWRITES the entry when an id is reused. The first order then stayed in its
+    // price level's list -- still counted in totalQuantity, still matchable against
+    // incoming flow -- while the only handle to it was destroyed. It could never be
+    // cancelled or amended again: live risk, stranded in the book forever, and the
+    // book's own order count under-reported it. Refuse the duplicate instead.
+    if (isLive(order.id)) {
+        return false;
+    }
+
+    Order newOrder = order;
+    newOrder.timestamp = timestamp_++;
+
+    if (newOrder.type == OrderType::LIMIT) {
+        matchLimitOrder(newOrder);
+    } else {
+        matchMarketOrder(newOrder);
+    }
+    return true;
 }
 
 bool OrderBook::cancelOrder(OrderId orderId) {
-    auto it = orderIndex_.find(orderId);
-    if (it == orderIndex_.end()) {
-        return false;  // Order not found
+    if (!isLive(orderId)) {
+        return false;  // Order not resting in the book
     }
-    
+
     removeFromBook(orderId);
     return true;
 }
 
 bool OrderBook::modifyOrder(OrderId orderId, Price newPrice, Quantity newQuantity) {
-    auto it = orderIndex_.find(orderId);
-    if (it == orderIndex_.end()) {
+    PriceLevel* level = nullptr;
+    Order* resting = findResting(orderId, &level);
+    if (resting == nullptr) {
         return false;  // Order not found
     }
-    
-    const OrderLocation& loc = it->second;
-    Order oldOrder = *loc.orderIt;
-    
-    removeFromBook(orderId);
 
-    Order newOrder = oldOrder;
-    newOrder.price = newPrice;
-    newOrder.quantity = newQuantity;
-    newOrder.timestamp = timestamp_++;  // New timestamp (loses priority)
-    
-    addOrder(newOrder);
+    // An amend down to zero size is a cancel.
+    if (newQuantity == 0) {
+        removeFromBook(orderId);
+        return true;
+    }
+
+    // Under price-time priority a pure size REDUCTION must RETAIN queue position:
+    // the trader is only giving up liquidity, never asking for a better place in
+    // line. Only a price change or a size INCREASE forfeits time priority.
+    //
+    // The old code removed and re-added the order with a fresh timestamp on EVERY
+    // amend, so merely shrinking an order silently sent it to the back of the queue
+    // -- a real, unearned economic loss for the trader, and a violation of the very
+    // matching rule this book claims to implement.
+    if (newPrice == resting->price && newQuantity <= resting->quantity) {
+        level->totalQuantity -= (resting->quantity - newQuantity);
+        resting->quantity = newQuantity;
+        // timestamp deliberately untouched -> queue position retained.
+        return true;
+    }
+
+    // Price change or size increase: forfeit priority, re-enter at the back.
+    Order updated = *resting;  // copy before removeFromBook invalidates the node
+    updated.price = newPrice;
+    updated.quantity = newQuantity;
+    updated.type = OrderType::LIMIT;  // re-enter as a limit order, never as MODIFY
+
+    removeFromBook(orderId);  // must precede addOrder: frees the id for reuse
+    addOrder(updated);        // fresh timestamp; may now cross and match
     return true;
 }
 
@@ -117,8 +149,9 @@ void OrderBook::matchAgainstBook(Order& order, std::map<Price, PriceLevel, Compa
             level.totalQuantity -= matchQty;
             
             if (restingOrder.quantity == 0) {
-                // Remove fully filled order
-                orderIndex_.erase(restingOrder.id);
+                // Remove fully filled order. Its id leaves the index, so it becomes
+                // reusable; the level itself is erased below once it empties.
+                eraseIndex(restingOrder.side, restingOrder.id);
                 orderIt = level.orders.erase(orderIt);
             } else {
                 ++orderIt;
@@ -146,57 +179,97 @@ void OrderBook::executeTrade(Order& aggressor, Order& resting, Quantity quantity
     // std::cout << "TRADE: " << quantity << " @ " << tradePrice << std::endl;
 }
 
-void OrderBook::addToBook(Order order) {
-    if (order.side == Side::BUY) {
-        auto [levelIt, inserted] = bids_.try_emplace(order.price, order.price);
-        PriceLevel& level = levelIt->second;
-        
-        level.orders.push_back(order);
-        level.totalQuantity += order.quantity;
-        orderIndex_[order.id] = {std::prev(level.orders.end()), order.price, order.side};
+bool OrderBook::isLive(OrderId orderId) const {
+    return bidIndex_.find(orderId) != bidIndex_.end() ||
+           askIndex_.find(orderId) != askIndex_.end();
+}
+
+void OrderBook::eraseIndex(Side side, OrderId orderId) {
+    if (side == Side::BUY) {
+        bidIndex_.erase(orderId);
     } else {
-        auto [levelIt, inserted] = asks_.try_emplace(order.price, order.price);
+        askIndex_.erase(orderId);
+    }
+}
+
+Order* OrderBook::findResting(OrderId orderId, PriceLevel** outLevel) {
+    // Both branches are O(1) hash probes, and the cached level iterator means we
+    // reach the PriceLevel with a pointer hop -- never a map search.
+    auto bidIt = bidIndex_.find(orderId);
+    if (bidIt != bidIndex_.end()) {
+        if (outLevel) *outLevel = &bidIt->second.levelIt->second;
+        return &(*bidIt->second.orderIt);
+    }
+
+    auto askIt = askIndex_.find(orderId);
+    if (askIt != askIndex_.end()) {
+        if (outLevel) *outLevel = &askIt->second.levelIt->second;
+        return &(*askIt->second.orderIt);
+    }
+
+    return nullptr;
+}
+
+// Erase one order from its level, and drop the level if it just went empty.
+// list::erase(iterator) is O(1); map::erase(iterator) is amortized O(1).
+template <typename Book, typename Loc>
+void OrderBook::eraseOrderFromLevel(Book& book, const Loc& loc) {
+    auto levelIt = loc.levelIt;
+    PriceLevel& level = levelIt->second;
+
+    level.totalQuantity -= loc.orderIt->quantity;
+    level.orders.erase(loc.orderIt);
+
+    if (level.orders.empty()) {
+        book.erase(levelIt);
+    }
+}
+
+void OrderBook::addToBook(const Order& order) {
+    // Defence in depth: addOrder already rejects duplicate ids. Never let an index
+    // write clobber a live order -- that is exactly how orders used to get orphaned.
+    if (isLive(order.id)) {
+        return;
+    }
+
+    if (order.side == Side::BUY) {
+        auto levelIt = bids_.try_emplace(order.price, order.price).first;
         PriceLevel& level = levelIt->second;
 
         level.orders.push_back(order);
         level.totalQuantity += order.quantity;
-        orderIndex_[order.id] = {std::prev(level.orders.end()), order.price, order.side};
+        // Cache BOTH iterators: the list node AND the map node.
+        bidIndex_.emplace(order.id,
+                          BidLocation{std::prev(level.orders.end()), levelIt});
+    } else {
+        auto levelIt = asks_.try_emplace(order.price, order.price).first;
+        PriceLevel& level = levelIt->second;
+
+        level.orders.push_back(order);
+        level.totalQuantity += order.quantity;
+        askIndex_.emplace(order.id,
+                          AskLocation{std::prev(level.orders.end()), levelIt});
     }
 }
 
 void OrderBook::removeFromBook(OrderId orderId) {
-    auto indexIt = orderIndex_.find(orderId);
-    if (indexIt == orderIndex_.end()) {
+    // There is no std::map::find anywhere on this path any more. The level iterator
+    // was cached at insert time, so a cancel is: an O(1) hash probe, an O(1)
+    // list::erase, and an amortized-O(1) map::erase. Cancel is now genuinely O(1) in
+    // the order count N *and* in the price-level count M -- previously the O(log M)
+    // map::find made the advertised O(1) false.
+    auto bidIt = bidIndex_.find(orderId);
+    if (bidIt != bidIndex_.end()) {
+        eraseOrderFromLevel(bids_, bidIt->second);
+        bidIndex_.erase(bidIt);
         return;
     }
 
-    const OrderLocation& loc = indexIt->second;
-    std::map<Price, PriceLevel, std::greater<Price>>* bidBook = &bids_;
-    std::map<Price, PriceLevel, std::less<Price>>* askBook = &asks_;
-
-    if (loc.side == Side::BUY) {
-        auto levelIt = bidBook->find(loc.priceLevel);
-        if (levelIt != bidBook->end()) {
-            PriceLevel& level = levelIt->second;
-            level.totalQuantity -= loc.orderIt->quantity;
-            level.orders.erase(loc.orderIt);
-            if (level.orders.empty()) {
-                bidBook->erase(levelIt);
-            }
-        }
-    } else {
-        auto levelIt = askBook->find(loc.priceLevel);
-        if (levelIt != askBook->end()) {
-            PriceLevel& level = levelIt->second;
-            level.totalQuantity -= loc.orderIt->quantity;
-            level.orders.erase(loc.orderIt);
-            if (level.orders.empty()) {
-                askBook->erase(levelIt);
-            }
-        }
+    auto askIt = askIndex_.find(orderId);
+    if (askIt != askIndex_.end()) {
+        eraseOrderFromLevel(asks_, askIt->second);
+        askIndex_.erase(askIt);
     }
-
-    orderIndex_.erase(indexIt);
 }
 
 std::optional<Price> OrderBook::getBestBid() const {

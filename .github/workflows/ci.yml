@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build & test (${{ matrix.build_type }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ cmake
+
+      - name: Toolchain versions
+        run: |
+          g++ --version
+          cmake --version
+
+      - name: Configure (${{ matrix.build_type }})
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      # The test binary returns a nonzero exit code on any failed CHECK, which
+      # fails this step. Crucially it is run in BOTH Debug and Release: Release
+      # defines NDEBUG, and the suite used to compile every bare assert() to a
+      # no-op there while still exiting 0. Running Release is the whole point.
+      - name: Run verification tests
+        run: ./build/verify
+
+  benchmark:
+    name: benchmark (Release)
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ cmake
+
+      - name: Record hardware
+        run: |
+          echo "--- CPU ---"
+          lscpu | sed -n '1,20p'
+          echo "--- compiler ---"
+          g++ --version | head -1
+
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build benchmarks
+        run: cmake --build build --target latency_bench -j"$(nproc)"
+
+      # Latencies measured on a shared GitHub Actions runner are noisy and must be
+      # read as such. They are published to make the O(1)-cancel claim falsifiable
+      # (cancel latency must stay flat as price levels M grow), not to advertise
+      # absolute nanosecond figures.
+      - name: Run latency benchmarks
+        run: ./build/latency_bench
