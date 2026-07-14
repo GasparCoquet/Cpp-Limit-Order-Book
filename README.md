@@ -1,19 +1,17 @@
 # High-Performance Limit Order Book (C++)
 
 ![C++](https://img.shields.io/badge/language-C%2B%2B17-blue.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)
 
 A low-latency Limit Order Book (LOB) matching engine simulation implemented in **Modern C++ (C++17)**.
 This project focuses on microstructure mechanics, efficient memory management, and algorithmic complexity optimization for HFT scenarios.
 
 ## 🚀 Key Features
 
-* **O(1) Order Execution:** Implements constant-time lookups for order cancellation and modification using a dedicated `std::unordered_map` indexing layer.
+* **Fast Order Lookup:** A dedicated `std::unordered_map` indexing layer resolves an `OrderId` to its position in the book in O(1) average time.
 * **Price-Time Priority:** Standard matching algorithm ensuring fair execution based on price competitiveness and arrival time.
-* **Low Latency Architecture:**
-    * Uses `std::map` (Red-Black Tree) for ordered price levels to maintain a sorted book.
-    * Optimized using `std::list` (doubly linked list) for O(1) insertions/deletions at price levels; O(1) erase via list iterators for cancel/modify.
+* **Layered Data Structures:**
+    * Uses `std::map` (Red-Black Tree) for ordered price levels to maintain a sorted book; locating a price level is O(log M) in the number of price levels.
+    * Within a price level, orders are held in a `std::list` (doubly linked list), so appending an order and erasing one via a cached iterator are both O(1).
 * **Robust Simulation:** Supports standard order types (Limit, Market, Cancel, Modify).
 
 ## 🛠️ Technical Architecture
@@ -26,42 +24,22 @@ The engine uses a dual-structure approach to balance **Ordering** (needed for ma
     * Inside each `Level`, orders are a FIFO queue to respect Time priority.
 
 2.  **The Order Index:**
-    * Stored as `std::unordered_map<OrderId, OrderIterator>`.
-    * Maps a unique Order ID directly to its location in memory.
-    * **Result:** `CancelOrder(id)` is **O(1)** instead of O(N) or O(log N).
+    * Stored as `std::unordered_map<OrderId, OrderLocation>`.
+    * Maps a unique Order ID directly to its list iterator, price and side.
+    * **Result:** `cancelOrder(id)` is **O(log M)** in the number of *price levels* M, and O(1) amortized in the number of *orders* N. The index lookup and the `std::list::erase` are both O(1); the residual O(log M) comes from `removeFromBook` re-locating the price level with `std::map::find`, because `OrderLocation` stores a `Price` rather than a map iterator.
 
-## ⚡ Benchmark Results
+> **Known limitation:** caching the price-level iterator in `OrderLocation` would make cancellation genuinely O(1). This is tracked as a planned change; the README will not claim O(1) until the code delivers it.
 
-Latency measured per operation using `std::chrono::high_resolution_clock`, compiled with `-O3` (GCC 13.3, Linux x86-64).
+## ⚡ Benchmarks
 
-**Machine:** Intel Core Ultra 7 265U (12C/14T), 32 GB DDR5
+A latency benchmark harness lives in `benchmarks/latency_benchmarks.cpp` and can be built and run locally:
 
-### Shallow book (100 resting orders)
+```bash
+cmake --build . --target latency_bench
+./latency_bench
+```
 
-| Operation | Min (ns) | Mean (ns) | p50 (ns) | p95 (ns) | p99 (ns) | Max (ns) |
-|---|---:|---:|---:|---:|---:|---:|
-| Add limit (no match) | 63 | 244 | 96 | 152 | 2,092 | 1,187,163 |
-| Add limit (immediate match) | 67 | 88 | 76 | 134 | 178 | 8,438 |
-| Cancel order | 60 | 95 | 93 | 118 | 155 | 12,676 |
-| Modify order | 91 | 127 | 120 | 168 | 197 | 16,714 |
-| Market order (5 levels) | 249 | 271 | 257 | 334 | 380 | 26,005 |
-| getBestBid + getBestAsk | 30 | 34 | 33 | 39 | 43 | 9,137 |
-| getVolumeAtPrice | 30 | 33 | 32 | 34 | 41 | 9,907 |
-| Mixed workload | 39 | 147 | 125 | 309 | 430 | 48,098 |
-
-### Deep book (100,000 resting orders)
-
-| Operation | Min (ns) | Mean (ns) | p50 (ns) | p95 (ns) | p99 (ns) | Max (ns) |
-|---|---:|---:|---:|---:|---:|---:|
-| Add limit (no match) | 63 | 253 | 95 | 157 | 2,061 | 648,075 |
-| Cancel order | 60 | 99 | 92 | 115 | 166 | 11,260 |
-| Modify order | 104 | 179 | 170 | 226 | 291 | 17,297 |
-| Market order (50 levels) | 2,755 | 3,165 | 3,034 | 3,833 | 4,237 | 23,097 |
-| getBestBid + getBestAsk | 29 | 33 | 32 | 34 | 38 | 10,139 |
-| getVolumeAtPrice | 29 | 32 | 31 | 33 | 33 | 20,980 |
-| Mixed workload | 45 | 280 | 217 | 608 | 764 | 14,177 |
-
-> Cancel stays flat at ~92 ns regardless of book depth, confirming O(1) behavior. Best bid/ask queries are ~32 ns. Run `./latency_bench` to reproduce (`cmake --build . --target latency_bench`).
+No benchmark figures are published here. The previous numbers were not reproducible on the hardware available to the author, so they have been removed rather than left standing. A measured, reproducible benchmark — with the machine and methodology stated — is being reworked and will be published only once it can be regenerated from this repository.
 
 ## 📦 Build & Run
 
@@ -75,3 +53,7 @@ mkdir build && cd build
 cmake ..
 cmake --build .
 ```
+
+## 📄 License
+
+Released under the MIT License. See [LICENSE](LICENSE).
