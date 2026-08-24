@@ -49,23 +49,22 @@ The engine uses a dual-structure approach to balance **ordering** (needed for ma
 | `getVolumeAtPrice` | O(log M) | `map::find` |
 | Matching | O(levels swept) | plus O(1) per order filled |
 
-M = number of distinct price levels; N = number of resting orders. Note that no operation is O(N).
+M = number of distinct price levels; N = number of resting orders. No *book-keeping* operation is O(N): add, cancel, amend and best-quote lookup are all independent of how many orders rest in the book. Matching is the exception, and unavoidably so: a marketable order that consumes K resting orders costs O(K), and K is bounded only by N. The two `market order` rows in the benchmarks below measure exactly that.
 
 ## Benchmarks
 
-Latency figures below are **verbatim CI output** from [`.github/workflows/ci.yml`](.github/workflows/ci.yml); you can reproduce them by re-running the workflow, or locally with `cmake --build build --target latency_bench && ./build/latency_bench`.
+Every figure below is copied from one CI run: [job 97199996989](https://github.com/GasparCoquet/Cpp-Limit-Order-Book/actions/runs/32641797238), the benchmark leg of the workflow on the current HEAD. Re-run the workflow and you will get the same shapes on different absolute numbers, because GitHub does not guarantee which host you land on; that run drew an **AMD EPYC 9V45 96-Core Processor**, an earlier one on the same code drew an EPYC 7763 and was roughly 2x slower. Locally: `cmake --build build --target latency_bench && ./build/latency_bench`.
 
-**Hardware:** GitHub Actions `ubuntu-latest` runner: AMD EPYC 7763 64-Core Processor, 4 vCPU, g++ 13.3.0, `-O3`.
-This is a shared, virtualised CI runner. **Read the shape of each column, not the absolute numbers.** The point of this harness is to make the complexity claims falsifiable, not to advertise nanosecond figures.
+**Read the shape of each column, not the absolute numbers.** This harness exists to make the complexity claims falsifiable on a shared virtualised runner, not to advertise nanosecond figures.
 
 Each sample is measured as `now() - now()` around one operation, so it carries one clock read inside it. That floor is measured explicitly and subtracted in the `p50-ovh` column:
 
 ```
 TIMER OVERHEAD BASELINE (empty loop, two back-to-back steady_clock::now())
-  p50 = 30.0 ns   mean = 29.2 ns   min = 20.0 ns
+  p50 = 20.0 ns   mean = 21.4 ns   min = 20.0 ns
 ```
 
-At a ~30 ns floor with ~10 ns of quantisation, several of these operations are at or below what this harness can resolve. Rows that land under the floor are reported as `<floor`, not as a number.
+At a ~20 ns floor with ~10 ns of quantisation, several of these operations are at or below what this harness can resolve. Rows that land under the floor are reported as `<floor`, not as a number, and any difference of one quantum is noise.
 
 ### Cancel is O(1): the actual experiment
 
@@ -74,10 +73,10 @@ Sweep the price-level count **M** over three orders of magnitude with the order 
 ```
 Cancel                           Ops    p50(ns)      p50-ovh    p95(ns)    p99(ns)   mean(ns)
 ---------------------------------------------------------------------------------------------
-cancel M=10                    50000         51           21         61         71         55
-cancel M=100                   50000         51           21         61         71         56
-cancel M=1000                  50000         60           30         61         90         57
-cancel M=10000                 50000         60           30         61         90         57
+cancel M=10                    50000         30           10         40         41         33
+cancel M=100                   50000         30           10         40         41         33
+cancel M=1000                  50000         30           10         40         41         33
+cancel M=10000                 50000         30           10         40         50         34
 ```
 
 Now sweep the order count **N** with M fixed:
@@ -85,33 +84,48 @@ Now sweep the order count **N** with M fixed:
 ```
 Cancel                           Ops    p50(ns)      p50-ovh    p95(ns)    p99(ns)   mean(ns)
 ---------------------------------------------------------------------------------------------
-cancel N=10000                 10000         60           30         61         80         56
-cancel N=50000                 50000         60           30         61         80         56
-cancel N=200000               200000         60           30         61         71         56
+cancel N=10000                 10000         30           10         40         50         33
+cancel N=50000                 50000         30           10         40         50         34
+cancel N=200000               200000         30           10         40         50         33
 ```
 
-Flat in both, within the harness's resolution.
+Flat in both, across a 20x sweep in M and N.
 
 ### The control: an operation that is *not* O(1)
 
-`getVolumeAtPrice` is a `std::map::find` and is therefore genuinely O(log M). Its column is *expected* to climb, and it does. This is the control that shows the flat cancel column above is a real measurement and not an artifact of the setup:
+A flat column proves nothing on its own; it could just mean the harness cannot see anything. So the same binary measures an operation that is *known* to be O(log M) and must climb. `addOrder` inserts into the `std::map` of price levels:
+
+```
+Add limit (no match)             Ops    p50(ns)      p50-ovh    p95(ns)    p99(ns)   mean(ns)
+---------------------------------------------------------------------------------------------
+add M=10                       50000         40           20         51         70         49
+add M=100                      50000         50           30         60         71         50
+add M=1000                     50000         60           40         80         90         65
+add M=10000                    50000         80           60        110        141         83
+```
+
+That is the ramp the cancel column would show if the O(1) claim were false. Same harness, same run, same order of magnitude in M.
+
+`getVolumeAtPrice` is also a `map::find` and is measured too, but it is a weaker control: at this clock resolution three of its four points are identical and only the last one separates:
 
 ```
 getVolumeAtPrice                 Ops    p50(ns)      p50-ovh    p95(ns)    p99(ns)   mean(ns)
 ---------------------------------------------------------------------------------------------
-volume M=10                    50000         40           10         41         41         39
-volume M=100                   50000         40           10         41         41         40
-volume M=1000                  50000         40           10         60         71         45
-volume M=10000                 50000         70           40        131        211         78
+volume M=10                    50000         30           10         30         31         27
+volume M=100                   50000         30           10         40         40         29
+volume M=1000                  50000         30           10         50         70         36
+volume M=10000                 50000         50           30         90        121         54
 ```
+
+Read the `add` table as the control and this one as corroboration, not the other way round.
 
 ### Amend: the two paths
 
 ```
 Modify                           Ops    p50(ns)      p50-ovh    p95(ns)    p99(ns)   mean(ns)
 ---------------------------------------------------------------------------------------------
-modify in-place (shrink)       50000         30       <floor         40         40         31
-modify requeue (reprice)       50000         80           50        100        120         86
+modify in-place (shrink)       50000         20       <floor         30         31         23
+modify requeue (reprice)       50000         50           30         60         70         52
 ```
 
 An in-place shrink moves nothing and lands below the timer floor. A reprice is a remove + re-add. The gap between these two rows is the cost the engine used to pay on *every* amend, along with the queue position it silently threw away.
@@ -121,11 +135,13 @@ An in-place shrink moves nothing and lands below the timer floor. A reprice is a
 ```
 Operation                        Ops    p50(ns)      p50-ovh    p95(ns)    p99(ns)   mean(ns)
 ---------------------------------------------------------------------------------------------
-getBestBid+getBestAsk          50000         41           11         51         51         45
-market order (5 levels)         5000        591          561        622        662        503
-market order (50 levels)        2000       3657         3627       6223       6794       4542
-mixed 50/30/20 (10k book)      50000        160          130        371        531        193
+getBestBid+getBestAsk          50000         30           10         30         31         29
+market order (5 levels)         5000        160          140        161        310        162
+market order (50 levels)        2000       2013         1993       2103       2214       2031
+mixed 50/30/20 (10k book)      50000         90           70        190        270        103
 ```
+
+The two market-order rows are the linear-in-consumption cost made visible: 10x the levels swept costs about 13x the time. Nothing here is O(1) in what a marketable order actually eats, and the complexity table above says so.
 
 ## Tests
 
