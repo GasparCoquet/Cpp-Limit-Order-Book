@@ -8,13 +8,13 @@ This project focuses on microstructure mechanics, efficient memory management, a
 
 ## Key Features
 
-* **O(1) cancel and amend.** An `unordered_map` index resolves an `OrderId` to a cached `std::list` iterator (the order's node in its price level) *and* a cached `std::map` iterator (the level's node in the price book). Cancelling touches neither search structure: it is an O(1) hash probe, an O(1) `list::erase`, and an amortized-O(1) `map::erase`.
+* **O(1) cancel and amend.** An `unordered_map` index resolves an `OrderId` to a cached `std::list` iterator (the order's node in its price level) *and* a cached `std::map` iterator (the level's node in the price book). Cancelling touches neither search structure. It is an O(1) hash probe, an O(1) `list::erase`, and an amortized-O(1) `map::erase`.
 * **Correct price-time priority**, including amend semantics that most toy books get wrong:
   * a size **decrease** is applied in place and **retains** queue position,
   * a size **increase** or a **price change** forfeits priority and re-queues at the back,
   * an amend to zero quantity is a cancel.
 * **Duplicate order IDs are rejected**, rather than silently orphaning the existing order.
-* **Layered data structures:** `std::map` (red-black tree) for ordered price levels; a `std::list` FIFO queue within each level.
+* **Layered data structures.** `std::map` (red-black tree) for ordered price levels, with a `std::list` FIFO queue within each level.
 * **Order types:** Limit, Market, Cancel, Modify.
 
 ## Technical Architecture
@@ -33,9 +33,9 @@ The engine uses a dual-structure approach to balance **ordering** (needed for ma
    };
    ```
 
-   Caching the *level iterator* rather than the level's `Price` is what makes cancellation genuinely O(1): `removeFromBook` never has to re-locate the level with an O(log M) `std::map::find`. This is sound because `std::map` is node-based; its iterators stay valid across inserts and across erasure of *other* nodes, so an iterator captured at insert time is good for the whole life of the order.
+   Caching the *level iterator* rather than the level's `Price` is what makes cancellation genuinely O(1). `removeFromBook` never has to re-locate the level with an O(log M) `std::map::find`. This is sound because `std::map` is node-based, and its iterators stay valid across inserts and across erasure of *other* nodes, so an iterator captured at insert time is good for the whole life of the order.
 
-   The index is **split by side** (`bidIndex_` / `askIndex_`) because each side's location holds a differently-typed map iterator. A `std::variant` of the two is not an option: a map iterator's type is not parameterised by the map's comparator, so on libstdc++ both sides name the same `_Rb_tree_iterator` and the variant would have duplicate alternatives, and the standard guarantees nothing either way. Splitting the index sidesteps the question and stays type-safe. A lookup by id alone probes both: two O(1) hash probes.
+   The index is **split by side** (`bidIndex_` / `askIndex_`) because each side's location holds a differently-typed map iterator. A `std::variant` of the two is not an option, because a map iterator's type is not parameterised by the map's comparator, so on libstdc++ both sides name the same `_Rb_tree_iterator` and the variant would have duplicate alternatives, and the standard guarantees nothing either way. Splitting the index sidesteps the question and stays type-safe. A lookup by id alone probes both, at a cost of two O(1) hash probes.
 
 ### Complexity
 
@@ -49,11 +49,11 @@ The engine uses a dual-structure approach to balance **ordering** (needed for ma
 | `getVolumeAtPrice` | O(log M) | `map::find` |
 | Matching | O(levels swept) | plus O(1) per order filled |
 
-M = number of distinct price levels; N = number of resting orders. No *book-keeping* operation is O(N): add, cancel, amend and best-quote lookup are all independent of how many orders rest in the book. Matching is the exception, and unavoidably so: a marketable order that consumes K resting orders costs O(K), and K is bounded only by N. The two `market order` rows in the benchmarks below measure exactly that.
+M = number of distinct price levels, N = number of resting orders. No *book-keeping* operation is O(N). Add, cancel, amend and best-quote lookup are all independent of how many orders rest in the book. Matching is the exception, and unavoidably so, because a marketable order that consumes K resting orders costs O(K), and K is bounded only by N. The two `market order` rows in the benchmarks below measure exactly that.
 
 ## Benchmarks
 
-Every figure below is copied from one CI run: [job 97199996989](https://github.com/GasparCoquet/Cpp-Limit-Order-Book/actions/runs/32641797238), the benchmark leg of the workflow on the current HEAD. Re-run the workflow and you will get the same shapes on different absolute numbers, because GitHub does not guarantee which host you land on; that run drew an **AMD EPYC 9V45 96-Core Processor**, an earlier one on the same code drew an EPYC 7763 and was roughly 2x slower. Locally: `cmake --build build --target latency_bench && ./build/latency_bench`.
+Every figure below is copied from one CI run, [job 97199996989](https://github.com/GasparCoquet/Cpp-Limit-Order-Book/actions/runs/32641797238), the benchmark leg of the workflow on the current HEAD. Re-run the workflow and you will get the same shapes on different absolute numbers, because GitHub does not guarantee which host you land on. That run drew an **AMD EPYC 9V45 96-Core Processor**, an earlier one on the same code drew an EPYC 7763 and was roughly 2x slower. Locally, run `cmake --build build --target latency_bench && ./build/latency_bench`.
 
 **Read the shape of each column, not the absolute numbers.** This harness exists to make the complexity claims falsifiable on a shared virtualised runner, not to advertise nanosecond figures.
 
@@ -66,9 +66,9 @@ TIMER OVERHEAD BASELINE (empty loop, two back-to-back steady_clock::now())
 
 At a ~20 ns floor with ~10 ns of quantisation, several of these operations are at or below what this harness can resolve. Rows that land under the floor are reported as `<floor`, not as a number, and any difference of one quantum is noise.
 
-### Cancel is O(1): the actual experiment
+### The actual O(1) cancel experiment
 
-Sweep the price-level count **M** over three orders of magnitude with the order count N held constant. O(1) in M predicts a flat column; a hidden O(log M) `map::find` would climb.
+Sweep the price-level count **M** over three orders of magnitude with the order count N held constant. O(1) in M predicts a flat column, while a hidden O(log M) `map::find` would climb.
 
 ```
 Cancel                           Ops    p50(ns)      p50-ovh    p95(ns)    p99(ns)   mean(ns)
@@ -91,7 +91,7 @@ cancel N=200000               200000         30           10         40         
 
 Flat in both, across a 20x sweep in M and N.
 
-### The control: an operation that is *not* O(1)
+### The control, an operation that is *not* O(1)
 
 A flat column proves nothing on its own; it could just mean the harness cannot see anything. So the same binary measures an operation that is *known* to be O(log M) and must climb. `addOrder` inserts into the `std::map` of price levels:
 
@@ -119,7 +119,7 @@ volume M=10000                 50000         50           30         90        1
 
 Read the `add` table as the control and this one as corroboration, not the other way round.
 
-### Amend: the two paths
+### The two amend paths
 
 ```
 Modify                           Ops    p50(ns)      p50-ovh    p95(ns)    p99(ns)   mean(ns)
@@ -141,7 +141,7 @@ market order (50 levels)        2000       2013         1993       2103       22
 mixed 50/30/20 (10k book)      50000         90           70        190        270        103
 ```
 
-The two market-order rows are the linear-in-consumption cost made visible: 10x the levels swept costs about 13x the time. Nothing here is O(1) in what a marketable order actually eats, and the complexity table above says so.
+The two market-order rows are the linear-in-consumption cost made visible. 10x the levels swept costs about 13x the time. Nothing here is O(1) in what a marketable order actually eats, and the complexity table above says so.
 
 ## Tests
 
@@ -153,7 +153,7 @@ cmake --build build
 ./build/verify        # nonzero exit on any failure
 ```
 
-Assertions use a `CHECK` macro rather than `assert()`. This matters: `CMAKE_BUILD_TYPE=Release` defines `NDEBUG`, which compiles `assert()` to a no-op, so a suite built on bare `assert()` verifies **nothing** in the configuration it actually ships, while still printing a pass. `CHECK` is an ordinary runtime branch that cannot be compiled away, and the runner aborts if zero checks ever execute.
+Assertions use a `CHECK` macro rather than `assert()`. This matters because `CMAKE_BUILD_TYPE=Release` defines `NDEBUG`, which compiles `assert()` to a no-op, so a suite built on bare `assert()` verifies **nothing** in the configuration it actually ships, while still printing a pass. `CHECK` is an ordinary runtime branch that cannot be compiled away, and the runner aborts if zero checks ever execute.
 
 ## Build & Run
 
